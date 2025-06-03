@@ -1,0 +1,90 @@
+# 模型文件
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.pkl
+*.pickle
+*.model
+pytorch_model.bin
+model.safetensors
+optimizer.pt
+scheduler.pt
+
+# 模型输出目录
+model_output/
+model_output_*/
+checkpoints/
+outputs/
+runs/
+step-*/
+LATEST/
+
+# 训练日志和缓存
+wandb/
+logs/
+tensorboard_logs/
+*.log
+__pycache__/
+*.pyc
+*.pyo
+.cache/
+cache/
+*_cache/
+
+# 大型压缩文件
+*.tar.gz
+*.zip
+*.tar.bz2
+*.rar
+*.7z
+
+# DeepSpeed相关
+.deepspeed_env
+*.deepspeed
+
+# Python环境
+venv/
+env/
+.env
+*.egg-info/
+
+# IDE和系统文件
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+.history/
+.specstory/
+
+# 排除大目录
+DPO/
+FastChat/
+trl_example/
+datasets/
+
+# 排除code目录下的大文件夹
+code/wandb/
+code/model_output*/
+code/logs/
+code/Ptuning/
+code/wbr/
+code/wangbinrui/
+
+# 保留代码和配置文件
+!code/*.py
+!code/*.sh
+!code/*.md
+!code/pro_utils/
+!code/deepspeed_config/
+!scripts/
+
+# 保留根目录下的Python文件
+!*.py
+!*.md
+!README*
+!LICENSE*
