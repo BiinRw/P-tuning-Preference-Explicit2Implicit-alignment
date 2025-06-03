@@ -1,6 +1,6 @@
-# LLaMA RLHF Project
+# Preference alignment Project
 
-This repository contains the implementation of RLHF (Reinforcement Learning from Human Feedback) training for LLaMA models, focusing on preference-guided optimization.
+This repository contains the implementation of DPO () training for LLaMA and Qwen models, focusing on preference-guided optimization.
 
 ## Project Structure
 
