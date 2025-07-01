@@ -71,9 +71,25 @@ datasets/
 code/wandb/
 code/model_output*/
 code/logs/
-code/Ptuning/
 code/wbr/
 code/wangbinrui/
+
+# 排除Ptuning目录中的大文件，但保留代码文件
+code/Ptuning/model_output*/
+code/Ptuning/checkpoints/
+code/Ptuning/outputs/
+code/Ptuning/runs/
+code/Ptuning/logs/
+code/Ptuning/wandb/
+code/Ptuning/*.bin
+code/Ptuning/*.pt
+code/Ptuning/*.pth
+code/Ptuning/*.safetensors
+code/Ptuning/cache/
+code/Ptuning/__pycache__/
+code/Ptuning/inference_*/
+code/Ptuning/*output*/
+
 
 # 保留代码和配置文件
 !code/*.py
