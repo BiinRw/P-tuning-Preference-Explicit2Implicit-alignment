@@ -20,11 +20,11 @@
 	},
     "model_parallelism":{
         "enabled":true,
-        "degree":2
+        "degree":3
     },
-	"train_batch_size": 8,
-	"train_micro_batch_size_per_gpu": 4,
-    "gradient_accumulation_steps": 1,
+	"train_batch_size": 12,
+	"train_micro_batch_size_per_gpu": 1,
+    "gradient_accumulation_steps": 4,
     "gradient_clipping": 1.0,
     "steps_per_print": 100,
     "wall_clock_breakdown": false,

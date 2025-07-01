@@ -188,6 +188,33 @@ def get_custom_hh(split: str, silent: bool = False, cache_dir: str = None, file_
     print(f'Dataset {file_path} loading done.')
     return data
 
+def get_helpsteer(split: str, silent: bool = False, cache_dir: str = None, file_path: str = None)-> Dict[str, Dict[str, Union[List[Tuple[int, int]], List[str], str]]]:
+    """Load the HelpSteer dataset (processed format) from a JSONL file and convert it to the necessary format."""
+    print(f'Loading HelpSteer dataset ({split} split) from {file_path}')
+
+    data = defaultdict(lambda: defaultdict(list))
+
+    with open(file_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            example = json.loads(line.strip())
+            prompt = example["prompt"]
+            chosen = example["chosen"]
+            rejected = example["rejected"]
+            
+            # HelpSteer format: chosen/rejected already contain full prompt+response
+            # Extract only the response part by removing the prompt
+            chosen_response = chosen[len(prompt):].strip() if chosen.startswith(prompt) else chosen
+            rejected_response = rejected[len(prompt):].strip() if rejected.startswith(prompt) else rejected
+            
+            responses = [chosen_response, rejected_response]
+            n_responses = len(data[prompt]['responses'])
+            data[prompt]['pairs'].append((n_responses, n_responses + 1))
+            data[prompt]['responses'].extend(responses)
+            data[prompt]['sft_target'] = chosen_response
+    
+    print(f'HelpSteer dataset {file_path} loading done.')
+    return data
+
 def get_ultrafeedback_binarized(split: str, silent: bool = False, cache_dir: str = None, file_path: str = None)-> Dict[str, Dict[str, Union[List[Tuple[int, int]], List[str], str]]]:
     print(f'Loading dataset ({split} split) from {file_path}')
 
@@ -208,7 +235,7 @@ def get_ultrafeedback_binarized(split: str, silent: bool = False, cache_dir: str
     return data
 
 def get_dataset(name: str, split: str, silent: bool = False, cache_dir: str = None, file_path:str = None, ):
-    """Load the given dataset by name. Supported by default are 'shp', 'hh', and 'se'."""
+    """Load the given dataset by name. Supported by default are 'shp', 'hh', 'se', 'ufb', 'helpsteer'."""
     if name == 'shp':
         data = get_shp(split, silent=silent, cache_dir=cache_dir)
     elif name == 'hh':
@@ -219,6 +246,8 @@ def get_dataset(name: str, split: str, silent: bool = False, cache_dir: str = No
         data = get_custom_hh(split, silent=silent, cache_dir=cache_dir, file_path=file_path)
     elif name =='ufb':
         data = get_ultrafeedback_binarized(split, silent=silent, cache_dir=cache_dir, file_path=file_path)
+    elif name == 'helpsteer':
+        data = get_helpsteer(split, silent=silent, cache_dir=cache_dir, file_path=file_path)
     else:
         raise ValueError(f"Unknown dataset '{name}'")
 

@@ -407,7 +407,10 @@ class DPO_trainer(Trainer):
         ## Start Evaluation before training
         if self.args.wandb_enabled and rank==0:
             wandb.init(project=self.args.wandb_project, name= self.args.wandb_name)
-        for batch in tqdm(self.train_batches, desc = 'Training'):
+        
+        # 创建进度条，我们会更新它来显示metrics
+        progress_bar = tqdm(self.train_batches, desc='Training', position=0)
+        for batch_idx, batch in enumerate(progress_bar):
             
             if self.example_counter % self.args.eval_every == 0 and (self.example_counter > 0 or self.args.do_eval_at_start):
                 self.policy_engine.eval()
@@ -419,7 +422,7 @@ class DPO_trainer(Trainer):
                     if self.args.loss_name in {'dpo', 'ipo','scpd', 'sipa'}:
                         reference_text_table = wandb.Table(columns=["step", "prompt", "sample"])
                 
-                for eval_batch in tqdm(self.eval_batches, desc = 'Evaluating'):
+                for eval_batch in tqdm(self.eval_batches, desc='Evaluating', leave=False, position=1):
                     with torch.no_grad():
                         _, eval_metrics = self.compute_loss(eval_batch, self.args, train=False)
 
@@ -432,7 +435,7 @@ class DPO_trainer(Trainer):
 
                 if self.args.sample_during_eval:
                     if self.args.n_eval_model_samples < self.args.eval_batch_size:
-                        rank0_print(f'Warning: n_eval_model_samples ({self.args.n_eval_model_samples}) < eval_batch_size ({self.args.eval_batch_size}).Sampling from the first complete eval batch of prompts.'
+                        progress_bar.write(f'⚠️  Warning: n_eval_model_samples ({self.args.n_eval_model_samples}) < eval_batch_size ({self.args.eval_batch_size}). Sampling from the first complete eval batch of prompts.'
                         )
                         sample_batches = self.eval_batches[:1]
                     else:
@@ -450,11 +453,48 @@ class DPO_trainer(Trainer):
                             for prompt, sample in zip(eval_batch['prompt'], reference_samples):
                                 reference_text_table.add_data(self.examples_counter, prompt, sample)
                 mean_eval_metrics = {k: sum(v) / len(v) for k, v in all_eval_metrics.items()}
-                rank0_print(f'eval after {self.example_counter}: {formatted_dict(mean_eval_metrics)}')
+                
+                # 显示评估结果的详细版本
+                eval_summary = {}
+                if 'loss/eval' in mean_eval_metrics:
+                    eval_summary['total_loss'] = f"{mean_eval_metrics['loss/eval']:.4f}"
+                if 'loss_components/dpo_loss_eval' in mean_eval_metrics:
+                    eval_summary['dpo'] = f"{mean_eval_metrics['loss_components/dpo_loss_eval']:.4f}"
+                if 'loss_components/aligned_loss_eval' in mean_eval_metrics:
+                    eval_summary['align'] = f"{mean_eval_metrics['loss_components/aligned_loss_eval']:.4f}"
+                if 'loss_components/kl_div_eval' in mean_eval_metrics:
+                    eval_summary['kl'] = f"{mean_eval_metrics['loss_components/kl_div_eval']:.4f}"
+                if 'rewards_eval/accuracy' in mean_eval_metrics:
+                    eval_summary['acc'] = f"{mean_eval_metrics['rewards_eval/accuracy']:.3f}"
+                if 'rewards_eval/pref_accuracy' in mean_eval_metrics:
+                    eval_summary['pref_acc'] = f"{mean_eval_metrics['rewards_eval/pref_accuracy']:.3f}"
+                
+                progress_bar.write(f"📊 Eval @ step {self.example_counter}: {eval_summary}")
+                
+                # 详细的损失组件信息
+                eval_loss_details = []
+                for loss_name in ['dpo_loss', 'aligned_loss', 'weighted_aligned_loss', 'kl_div', 'weighted_kl_div']:
+                    key = f'loss_components/{loss_name}_eval'
+                    if key in mean_eval_metrics:
+                        eval_loss_details.append(f"{loss_name}={mean_eval_metrics[key]:.4f}")
+                
+                if eval_loss_details:
+                    progress_bar.write(f"   📈 Loss Components: {', '.join(eval_loss_details)}")
+                
+                # 偏好指标详情
+                pref_metrics = []
+                if 'preference_metrics/pref_advantage_ratio_eval' in mean_eval_metrics:
+                    pref_metrics.append(f"pref_adv={mean_eval_metrics['preference_metrics/pref_advantage_ratio_eval']:.3f}")
+                if 'preference_metrics/pref_delta_diff_eval' in mean_eval_metrics:
+                    pref_metrics.append(f"delta_diff={mean_eval_metrics['preference_metrics/pref_delta_diff_eval']:.3f}")
+                
+                if pref_metrics:
+                    progress_bar.write(f"   🎯 Preference Metrics: {', '.join(pref_metrics)}")
+                
                 if self.args.sample_during_eval:
-                    rank0_print(json.dumps(all_policy_samples[:10], indent=2))
-                    if self.args.loss_name in {'dpo', 'ipo','scpd','sipa'}:
-                        rank0_print(json.dumps(all_reference_samples[:10], indent=2))
+                    progress_bar.write("🎯 Sample generations:")
+                    for i, sample in enumerate(all_policy_samples[:3]):  # 只显示前3个样本
+                        progress_bar.write(f"  {i+1}. {sample[:100]}...")  # 截断长文本
 
                 if self.args.wandb_enabled and rank==0:
                     
@@ -466,12 +506,12 @@ class DPO_trainer(Trainer):
                             wandb.log({"reference_samples": reference_text_table}, step=self.example_counter)
                 if self.example_counter > 0:
                     if self.args.debug:
-                        rank0_print('skipping save in debug mode')
+                        progress_bar.write('🐛 Skipping save in debug mode')
                     else:
                         output_dir = os.path.join(self.args.run_dir, f'step-{self.example_counter}')
-                        rank0_print(f'creating checkpoint to write to {output_dir}...')
+                        progress_bar.write(f'💾 Creating checkpoint: {output_dir}')
                         self.save(output_dir, mean_eval_metrics)
-                        print("="*20+"save_done"+"="*20)
+                        progress_bar.write('✅ Checkpoint saved')
         ## End Evaluation before training
         ## Begin Training
             #print("="*20+"checkpoinit-1"+"="*20)
@@ -481,8 +521,6 @@ class DPO_trainer(Trainer):
             batch_metrics = defaultdict(list)
 
             loss, metrics = self.compute_loss(batch, self.args, train=True)
-            print(metrics)
-            print(type(metrics))
             #loss.backward()
             #print("="*20+"checkpoinit-2"+"="*20)
             #self.optimizer.step()
@@ -491,7 +529,7 @@ class DPO_trainer(Trainer):
             for name, param in self.policy_engine.named_parameters():
                 if param.grad is not None:
                     if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                        print(f"Gradient issue detected in {name}")
+                        progress_bar.write(f"⚠️  Gradient issue detected in {name}")
             self.batch_counter += 1
             self.example_counter += self.args.train_batch_size
             
@@ -512,13 +550,66 @@ class DPO_trainer(Trainer):
                 mean_train_metrics = {k: sum(v) / len(v) for k, v in batch_metrics.items()}
                 mean_train_metrics['counters/examples'] = self.example_counter
                 mean_train_metrics['counters/updates'] = self.batch_counter
-                rank0_print(f'train stats after {self.example_counter} examples: {formatted_dict(mean_train_metrics)}')
+                
+                # 构建详细的损失信息显示
+                key_metrics = {}
+                
+                # 主要损失指标
+                if 'loss/train' in mean_train_metrics:
+                    key_metrics['total_loss'] = f"{mean_train_metrics['loss/train']:.4f}"
+                
+                # 损失组件
+                if 'loss_components/dpo_loss_train' in mean_train_metrics:
+                    key_metrics['dpo'] = f"{mean_train_metrics['loss_components/dpo_loss_train']:.4f}"
+                if 'loss_components/aligned_loss_train' in mean_train_metrics:
+                    key_metrics['align'] = f"{mean_train_metrics['loss_components/aligned_loss_train']:.4f}"
+                if 'loss_components/kl_div_train' in mean_train_metrics:
+                    key_metrics['kl'] = f"{mean_train_metrics['loss_components/kl_div_train']:.4f}"
+                
+                # 准确率指标
+                if 'rewards_train/accuracy' in mean_train_metrics:
+                    key_metrics['acc'] = f"{mean_train_metrics['rewards_train/accuracy']:.3f}"
+                if 'rewards_train/pref_accuracy' in mean_train_metrics:
+                    key_metrics['pref_acc'] = f"{mean_train_metrics['rewards_train/pref_accuracy']:.3f}"
+                
+                # 性能指标
+                if 'examples_per_second' in mean_train_metrics:
+                    key_metrics['ex/s'] = f"{mean_train_metrics['examples_per_second']:.1f}"
+                
+                progress_bar.set_postfix(key_metrics)
+                
+                # 每隔几步详细打印损失组件
+                if self.batch_counter % (self.args.logging_steps * 2) == 0:
+                    loss_details = []
+                    for loss_name in ['dpo_loss', 'aligned_loss', 'weighted_aligned_loss', 'kl_div', 'weighted_kl_div']:
+                        key = f'loss_components/{loss_name}_train'
+                        if key in mean_train_metrics:
+                            loss_details.append(f"{loss_name}={mean_train_metrics[key]:.4f}")
+                    
+                    if loss_details:
+                        progress_bar.write(f"📈 Step {self.batch_counter} Loss Details: {', '.join(loss_details)}")
+                
                 if rank == 0 and self.args.wandb_enabled:
                     wandb.log(mean_train_metrics, step=self.example_counter)
 
                 last_log = time.time()
             else:
-                rank0_print(f'skipping logging after {self.example_counter} examples to avoid logging too frequently')
+                # 仍然更新进度条，但使用最新的batch metrics
+                key_metrics = {}
+                if batch_metrics:
+                    # 获取最新的loss值
+                    if 'loss/train' in batch_metrics:
+                        key_metrics['total_loss'] = f"{batch_metrics['loss/train'][-1]:.4f}"
+                    if 'loss_components/dpo_loss_train' in batch_metrics:
+                        key_metrics['dpo'] = f"{batch_metrics['loss_components/dpo_loss_train'][-1]:.4f}"
+                    if 'loss_components/aligned_loss_train' in batch_metrics:
+                        key_metrics['align'] = f"{batch_metrics['loss_components/aligned_loss_train'][-1]:.4f}"
+                    if 'rewards_train/accuracy' in batch_metrics:
+                        key_metrics['acc'] = f"{batch_metrics['rewards_train/accuracy'][-1]:.3f}"
+                    if 'examples_per_second' in batch_metrics:
+                        key_metrics['ex/s'] = f"{batch_metrics['examples_per_second'][-1]:.1f}"
+                
+                progress_bar.set_postfix(key_metrics)
 
 
     def write_state_dict(self, step: int, state: Dict[str, torch.Tensor], metrics: Dict, filename: str, dir_name: Optional[str] = None):
@@ -686,7 +777,7 @@ class PreferenceDPO_trainer(DPO_trainer):
         # 使用缓存的embedding信息
         self._refresh_embedding_cache_if_needed()
             
-        embedding_layer = self._cached_embedding_info['embedding_layer']
+        # 只使用缓存的基本信息，不使用缓存的embedding层
         model_dtype = self._cached_embedding_info['model_dtype']
         model_device = self._cached_embedding_info['model_device']
         embed_dim = self._cached_embedding_info['embed_dim']
@@ -702,21 +793,27 @@ class PreferenceDPO_trainer(DPO_trainer):
         attention_mask = attention_mask.to(device=model_device)
         labels = labels.to(device=model_device)
         
-        # Get token embeddings using cached embedding layer
+        # 直接使用当前模型的embedding层，不使用缓存的embedding层
+        # 这样确保使用正确的模型（policy或reference）的embedding层
         try:
-            if embedding_layer is not None:
-                with torch.no_grad():
-                    token_embeddings = embedding_layer(input_ids)  # [batch_size, seq_len, embed_dim]
+            current_embedding_layer = actual_model.get_input_embeddings()
+            token_embeddings = current_embedding_layer(input_ids)  # [batch_size, seq_len, embed_dim]
+            
+            # 更新模型信息（使用当前模型的实际信息）
+            model_dtype = current_embedding_layer.weight.dtype
+            model_device = current_embedding_layer.weight.device
+            # 修复：embedding layer的weight形状通常是[vocab_size, embed_dim]
+            if len(current_embedding_layer.weight.shape) >= 2:
+                embed_dim = current_embedding_layer.weight.shape[-1]  # 最后一个维度是embed_dim
             else:
-                # Fallback: 使用模型的embedding层
-                token_embeddings = actual_model.get_input_embeddings()(input_ids)
-                
+                embed_dim = token_embeddings.shape[-1]  # fallback到实际输出的embed_dim
+            
         except Exception as e:
-            print(f"获取token embeddings时出错: {e}")
             # 最终fallback
             token_embeddings = actual_model.get_input_embeddings()(input_ids)
             model_dtype = token_embeddings.dtype
             model_device = token_embeddings.device
+            embed_dim = token_embeddings.shape[-1]
         
         # 更新embed_dim以防缓存失效
         if token_embeddings.shape[-1] != embed_dim:
@@ -725,6 +822,9 @@ class PreferenceDPO_trainer(DPO_trainer):
         
         # Ensure prompt embeddings match token embeddings' device and dtype
         prompt_embeddings = prompt_embeddings.to(device=model_device, dtype=model_dtype)
+        
+        # 确保token_embeddings也有正确的dtype
+        token_embeddings = token_embeddings.to(dtype=model_dtype)
         
         # Prepare prompt embeddings for insertion
         if prompt_embeddings.dim() == 1:
@@ -743,8 +843,10 @@ class PreferenceDPO_trainer(DPO_trainer):
         prompt_embeddings = prompt_embeddings.unsqueeze(0).expand(batch_size, -1, -1)  # [batch_size, prompt_len, embed_dim]
         
         # Insert prompt embeddings at the specified position
+        # 确保在拼接前所有tensor都有相同的dtype
         if insert_position == 0:
             # Insert at the beginning
+            prompt_embeddings = prompt_embeddings.to(dtype=token_embeddings.dtype)
             modified_embeddings = torch.cat([prompt_embeddings, token_embeddings], dim=1)
             modified_attention_mask = torch.cat([
                 torch.ones(batch_size, prompt_embeddings.shape[1], device=model_device, dtype=attention_mask.dtype),
@@ -752,6 +854,7 @@ class PreferenceDPO_trainer(DPO_trainer):
             ], dim=1)
         elif insert_position >= token_embeddings.shape[1]:
             # Insert at the end
+            prompt_embeddings = prompt_embeddings.to(dtype=token_embeddings.dtype)
             modified_embeddings = torch.cat([token_embeddings, prompt_embeddings], dim=1)
             modified_attention_mask = torch.cat([
                 attention_mask,
@@ -761,6 +864,7 @@ class PreferenceDPO_trainer(DPO_trainer):
             # Insert in the middle
             before_embeddings = token_embeddings[:, :insert_position, :]
             after_embeddings = token_embeddings[:, insert_position:, :]
+            prompt_embeddings = prompt_embeddings.to(dtype=token_embeddings.dtype)
             modified_embeddings = torch.cat([before_embeddings, prompt_embeddings, after_embeddings], dim=1)
             
             before_mask = attention_mask[:, :insert_position]
@@ -770,6 +874,9 @@ class PreferenceDPO_trainer(DPO_trainer):
                 torch.ones(batch_size, prompt_embeddings.shape[1], device=model_device, dtype=attention_mask.dtype),
                 after_mask
             ], dim=1)
+        
+        # 确保最终的modified_embeddings有正确的dtype
+        modified_embeddings = modified_embeddings.to(dtype=model_dtype)
         
         # Modify labels accordingly (add -100 for prompt embedding positions)
         if insert_position == 0:
@@ -805,28 +912,185 @@ class PreferenceDPO_trainer(DPO_trainer):
         
         return log_probs
     
+    def _normalize_logratios(self, pi_logratios_raw: torch.Tensor, pi_pref_logratios_raw: torch.Tensor, 
+                           normalize_strategy: str = "scale_to_base") -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Normalize log ratios using the specified strategy.
+        
+        Args:
+            pi_logratios_raw: Raw log ratios for base inputs (policy_chosen_logps - policy_rejected_logps)
+            pi_pref_logratios_raw: Raw log ratios for preference-augmented inputs
+            normalize_strategy: Normalization strategy to apply
+            
+        Returns:
+            Tuple of (normalized_base_logratios, normalized_pref_logratios)
+        """
+        if normalize_strategy == "min_max":
+            # Min-Max归一化：将两个比值缩放到相同的[0,1]范围
+            pi_logratios_min, pi_logratios_max = pi_logratios_raw.min(), pi_logratios_raw.max()
+            pi_pref_logratios_min, pi_pref_logratios_max = pi_pref_logratios_raw.min(), pi_pref_logratios_raw.max()
+            
+            # 避免除零
+            pi_range = pi_logratios_max - pi_logratios_min + 1e-8
+            pi_pref_range = pi_pref_logratios_max - pi_pref_logratios_min + 1e-8
+            
+            pi_logratios = (pi_logratios_raw - pi_logratios_min) / pi_range
+            pi_pref_logratios = (pi_pref_logratios_raw - pi_pref_logratios_min) / pi_pref_range
+            
+        elif normalize_strategy == "z_score":
+            # Z-score标准化：将两个比值标准化为均值0，标准差1
+            pi_logratios = (pi_logratios_raw - pi_logratios_raw.mean()) / (pi_logratios_raw.std() + 1e-8)
+            pi_pref_logratios = (pi_pref_logratios_raw - pi_pref_logratios_raw.mean()) / (pi_pref_logratios_raw.std() + 1e-8)
+            
+        elif normalize_strategy == "scale_to_base":
+            # 将preference logratios缩放到与base logratios相同的量级
+            base_scale = pi_logratios_raw.abs().mean() + 1e-8
+            pref_scale = pi_pref_logratios_raw.abs().mean() + 1e-8
+            scale_factor = base_scale / pref_scale
+            
+            pi_logratios = pi_logratios_raw
+            pi_pref_logratios = pi_pref_logratios_raw * scale_factor
+            
+        elif normalize_strategy == "adaptive_scaling":
+            # 自适应缩放：根据两个分布的方差比进行缩放
+            base_var = pi_logratios_raw.var() + 1e-8
+            pref_var = pi_pref_logratios_raw.var() + 1e-8
+            scale_factor = torch.sqrt(base_var / pref_var)
+            
+            pi_logratios = pi_logratios_raw
+            pi_pref_logratios = pi_pref_logratios_raw * scale_factor
+            
+        elif normalize_strategy == "soft_clamp":
+            # 软钳位：使用tanh函数将极值压缩到合理范围
+            pi_logratios = torch.tanh(pi_logratios_raw / 2.0) * 2.0
+            pi_pref_logratios = torch.tanh(pi_pref_logratios_raw / 2.0) * 2.0
+            
+        elif normalize_strategy == "robust_scaling":
+            # 鲁棒缩放：保持数值范围的同时对齐分布
+            # 使用中位数和四分位距进行缩放，对异常值更鲁棒
+            base_median = torch.median(pi_logratios_raw)
+            pref_median = torch.median(pi_pref_logratios_raw)
+            
+            base_q75 = torch.quantile(pi_logratios_raw, 0.75)
+            base_q25 = torch.quantile(pi_logratios_raw, 0.25)
+            base_iqr = base_q75 - base_q25 + 1e-8
+            
+            pref_q75 = torch.quantile(pi_pref_logratios_raw, 0.75)
+            pref_q25 = torch.quantile(pi_pref_logratios_raw, 0.25)
+            pref_iqr = pref_q75 - pref_q25 + 1e-8
+            
+            # 缩放到相同的四分位距
+            scale_factor = base_iqr / pref_iqr
+            
+            pi_logratios = pi_logratios_raw
+            pi_pref_logratios = (pi_pref_logratios_raw - pref_median) * scale_factor + base_median
+            
+        elif normalize_strategy == "magnitude_preserve":
+            # 保持数值大小的归一化：只对齐方向和相对大小，保持绝对数值范围
+            # 添加数值稳定性检查
+            base_std = pi_logratios_raw.std() + 1e-8
+            pref_std = pi_pref_logratios_raw.std() + 1e-8
+            
+            # 保持较大的标准差作为目标范围，但限制最大放大倍数
+            target_std = torch.max(base_std, pref_std)
+            
+            # 限制放大倍数，避免数值爆炸
+            max_scale_factor = 10.0  # 限制最大放大10倍
+            base_scale_factor = torch.clamp(target_std / base_std, min=0.1, max=max_scale_factor)
+            pref_scale_factor = torch.clamp(target_std / pref_std, min=0.1, max=max_scale_factor)
+            
+            # 缩放到相同的标准差，但保持均值
+            pi_logratios = pi_logratios_raw * base_scale_factor
+            pi_pref_logratios = pi_pref_logratios_raw * pref_scale_factor
+            
+            # 额外的数值稳定性检查
+            pi_logratios = torch.clamp(pi_logratios, min=-100, max=100)
+            pi_pref_logratios = torch.clamp(pi_pref_logratios, min=-100, max=100)
+            
+        elif normalize_strategy == "percentile_scaling":
+            # 百分位缩放：基于90%分位数进行缩放，避免极值影响
+            base_p90 = torch.quantile(torch.abs(pi_logratios_raw), 0.9) + 1e-8
+            pref_p90 = torch.quantile(torch.abs(pi_pref_logratios_raw), 0.9) + 1e-8
+            
+            scale_factor = base_p90 / pref_p90
+            
+            pi_logratios = pi_logratios_raw
+            pi_pref_logratios = pi_pref_logratios_raw * scale_factor
+            
+        elif normalize_strategy == "dynamic_range":
+            # 动态范围保持：保持原始数值的动态范围
+            base_range = pi_logratios_raw.max() - pi_logratios_raw.min() + 1e-8
+            pref_range = pi_pref_logratios_raw.max() - pi_pref_logratios_raw.min() + 1e-8
+            
+            # 选择较大的范围作为目标
+            target_range = torch.max(base_range, pref_range)
+            
+            # 缩放到目标范围
+            base_scale = target_range / base_range
+            pref_scale = target_range / pref_range
+            
+            pi_logratios = pi_logratios_raw * base_scale
+            pi_pref_logratios = pi_pref_logratios_raw * pref_scale
+            
+        else:  # "none" or default
+            # 不进行归一化，只是简单clamp
+            pi_logratios = torch.clamp(pi_logratios_raw, min=-10, max=10)
+            pi_pref_logratios = torch.clamp(pi_pref_logratios_raw, min=-10, max=10)
+            
+        return pi_logratios, pi_pref_logratios
+
     def preference_augmented_loss(self, policy_chosen_logps, policy_rejected_logps,
                                  policy_pref_chosen_logps, policy_pref_rejected_logps,
                                  reference_chosen_logps, reference_rejected_logps,
                                  reference_pref_chosen_logps, reference_pref_rejected_logps,
-                                 beta: float, alpha: float, lambda_kl: float = 0.1, label_smoothing: float = 0.0):
-        """Compute loss using both original and preference-augmented inputs."""
-        # Calculate P_theta(y_w|x) - P_theta(y_l|x) and P_theta(y_w|x,p) - P_theta(y_l|x,p)
-        pi_logratios = torch.clamp(policy_chosen_logps - policy_rejected_logps, min=-10, max=10)
-        pi_pref_logratios = torch.clamp(policy_pref_chosen_logps - policy_pref_rejected_logps, min=-10, max=10)
+                                 beta: float, alpha: float, lambda_kl: float = 0.1, 
+                                 label_smoothing: float = 0.0, normalize_strategy: str = "scale_to_base",
+                                 pre_normalize_strategy: str = "distribution_aware"):
+        """Compute loss using both original and preference-augmented inputs with normalization."""
+        
+        # Print original distribution ranges for debugging
+        # print(f"Original logps ranges:")
+        # print(f"  policy_chosen_logps: [{policy_chosen_logps.min():.4f}, {policy_chosen_logps.max():.4f}]")
+        # print(f"  policy_pref_chosen_logps: [{policy_pref_chosen_logps.min():.4f}, {policy_pref_chosen_logps.max():.4f}]")
+        
+        # Step 1: Pre-normalize raw log probabilities to handle distribution mismatch
+        if pre_normalize_strategy != "none":
+            policy_chosen_logps_norm, policy_rejected_logps_norm, policy_pref_chosen_logps_norm, policy_pref_rejected_logps_norm = self._pre_normalize_logps(
+                policy_chosen_logps, policy_rejected_logps,
+                policy_pref_chosen_logps, policy_pref_rejected_logps,
+                pre_normalize_strategy
+            )
+        else:
+            policy_chosen_logps_norm = policy_chosen_logps
+            policy_rejected_logps_norm = policy_rejected_logps
+            policy_pref_chosen_logps_norm = policy_pref_chosen_logps
+            policy_pref_rejected_logps_norm = policy_pref_rejected_logps
+        
+        # Step 2: Calculate log ratios from normalized log probabilities
+        pi_logratios_raw = policy_chosen_logps_norm - policy_rejected_logps_norm
+        pi_pref_logratios_raw = policy_pref_chosen_logps_norm - policy_pref_rejected_logps_norm
+        # print(f"After pre-normalization log ratios:")
+        # print(f"  pi_logratios_raw: [{pi_logratios_raw.min():.4f}, {pi_logratios_raw.max():.4f}]")
+        # print(f"  pi_pref_logratios_raw: [{pi_pref_logratios_raw.min():.4f}, {pi_pref_logratios_raw.max():.4f}]")
+        
+        # Step 3: Apply secondary normalization strategy if needed
+        pi_logratios, pi_pref_logratios = self._normalize_logratios(
+            pi_logratios_raw, pi_pref_logratios_raw, normalize_strategy
+        )
         
         # Calculate P_ref(y_w|x) - P_ref(y_l|x) and P_ref(y_w|x,p) - P_ref(y_l|x,p)
         ref_logratios = reference_chosen_logps - reference_rejected_logps
         ref_pref_logratios = reference_pref_chosen_logps - reference_pref_rejected_logps
         
-        dpo_loss = -F.logsigmoid(beta * pi_logratios).mean()
+        # DPO loss (使用归一化后的比值)
+        dpo_loss = -F.logsigmoid(beta * pi_logratios_raw).mean()
 
-        # Calculate logits for original and preference-augmented inputs
+        # Aligned loss: 鼓励模型在显式偏好下的表现向隐式偏好对齐
+        # 使用归一化后的比值计算对齐损失
         explicit_to_implicit_logp = pi_pref_logratios.detach() - pi_logratios
-        # Clamp to avoid extreme values
         aligned_loss = F.relu(explicit_to_implicit_logp).mean()
 
-        # Reference KL 约束
+        # Reference KL 约束 (使用原始logps计算KL散度)
         logits_pol_base = torch.clamp(torch.stack([policy_chosen_logps, policy_rejected_logps], dim=1), min=-10, max=10)
         logits_ref_base = torch.clamp(torch.stack([reference_chosen_logps, reference_rejected_logps], dim=1), min=-10, max=10)
         logp_pol_base = F.log_softmax(logits_pol_base, dim=1)
@@ -843,6 +1107,7 @@ class PreferenceDPO_trainer(DPO_trainer):
         
         # 检测并处理NaN值
         if torch.isnan(kl_base):
+            # Note: 在训练循环外无法访问progress_bar，这里保持原样或使用rank0_print
             print(f"Warning: kl_base is NaN! logits_pol_base: {logits_pol_base}, logits_ref_base: {logits_ref_base}")
             kl_base = torch.tensor(0.0, device=kl_pref.device)
         if torch.isnan(kl_pref):
@@ -851,23 +1116,29 @@ class PreferenceDPO_trainer(DPO_trainer):
             
         kl_div = (kl_base + kl_pref) / 2.0
 
-        # Combine losses from original and preference-augmented inputs
-        # You can adjust the weighting as needed
+        # 组合损失
         losses = dpo_loss + alpha * aligned_loss + lambda_kl * kl_div
                 
-        # Calculate rewards for logging
+        # 计算奖励 (使用原始logps)
         chosen_rewards = beta * (policy_chosen_logps - reference_chosen_logps).detach()
         rejected_rewards = beta * (policy_rejected_logps - reference_rejected_logps).detach()
         pref_chosen_rewards = beta * (policy_pref_chosen_logps - reference_pref_chosen_logps).detach()
         pref_rejected_rewards = beta * (policy_pref_rejected_logps - reference_pref_rejected_logps).detach()
         
-# 返回各个损失组件，用于监控训练过程
+        # 返回损失组件和归一化信息
         loss_components = {
             'dpo_loss': dpo_loss.item(),
             'aligned_loss': aligned_loss.item(),
             'kl_div': kl_div.item(),
             'weighted_aligned_loss': (alpha * aligned_loss).item(),
-            'weighted_kl_div': (lambda_kl * kl_div).item()
+            'weighted_kl_div': (lambda_kl * kl_div).item(),
+            # 添加归一化前后的统计信息
+            'raw_base_logratios_mean': pi_logratios_raw.mean().item(),
+            'raw_pref_logratios_mean': pi_pref_logratios_raw.mean().item(),
+            'raw_base_logratios_std': pi_logratios_raw.std().item(),
+            'raw_pref_logratios_std': pi_pref_logratios_raw.std().item(),
+            'normalized_base_logratios_mean': pi_logratios.mean().item(),
+            'normalized_pref_logratios_mean': pi_pref_logratios.mean().item(),
         }
         
         return losses, chosen_rewards, rejected_rewards, pref_chosen_rewards, pref_rejected_rewards, loss_components
@@ -885,7 +1156,13 @@ class PreferenceDPO_trainer(DPO_trainer):
                 reference_chosen_logps, reference_rejected_logps, reference_pref_chosen_logps, reference_pref_rejected_logps, _ = self.concatenated_forward_with_preference(self.reference_engine, batch)
             
             if training_args.loss_name == 'new_pref_po':
-                loss_kwargs = {'beta': training_args.beta, 'alpha': training_args.alpha, 'lambda_kl': getattr(training_args, 'lambda_kl', 0.1)}
+                loss_kwargs = {
+                    'beta': training_args.beta, 
+                    'alpha': training_args.alpha, 
+                    'lambda_kl': getattr(training_args, 'lambda_kl', 0.1),
+                    'normalize_strategy': getattr(training_args, 'normalize_strategy', 'scale_to_base'),
+                    'pre_normalize_strategy': getattr(training_args, 'pre_normalize_strategy', 'distribution_aware')
+                }
             
 # 修改这里以接收返回的损失组件
             losses, chosen_rewards, rejected_rewards, pref_chosen_rewards, pref_rejected_rewards, loss_components = self.preference_augmented_loss(
@@ -909,6 +1186,40 @@ class PreferenceDPO_trainer(DPO_trainer):
             delta_w_ref_logps = policy_chosen_logps - reference_chosen_logps
             delta_l_ref_logps = policy_rejected_logps - reference_rejected_logps
             ref_advantage_ratio = torch.exp(delta_w_ref_logps - delta_l_ref_logps)
+            
+            # ================== 理论框架指标计算 ==================
+            # 使用封装的归一化方法获取归一化后的 logratios
+            pi_logratios_raw = policy_chosen_logps - policy_rejected_logps
+            pi_pref_logratios_raw = policy_pref_chosen_logps - policy_pref_rejected_logps
+            
+            # 应用与 preference_augmented_loss 相同的归一化策略
+            normalize_strategy = getattr(training_args, 'normalize_strategy', 'scale_to_base')
+            pi_logratios_normalized, pi_pref_logratios_normalized = self._normalize_logratios(
+                pi_logratios_raw, pi_pref_logratios_raw, normalize_strategy
+            )
+            
+            # PMS: Preference Margin Score - 条件(S1)的度量（使用归一化后的值）
+            pms_score = pi_logratios_normalized
+            
+            # TGS: Transfer Gap Score - 条件(S2)的度量（使用归一化后的值）
+            ell_p = pi_pref_logratios_normalized  # 显式偏好优势（归一化后）
+            ell_base = pi_logratios_normalized     # 隐式偏好优势（归一化后）
+            tgs_score = torch.abs(ell_p - ell_base)  # 传输差距（基于归一化后的值）
+            
+            # PCR: Preference Consistency Rate - 条件(N3)的度量
+            pcr_score = (policy_chosen_logps > policy_rejected_logps).float()
+            
+            # 额外的理论指标
+            # Signal Sensitivity - 条件(N1)的度量
+            signal_sensitivity_w = torch.abs(policy_pref_chosen_logps - policy_chosen_logps)
+            signal_sensitivity_l = torch.abs(policy_pref_rejected_logps - policy_rejected_logps)
+            signal_sensitivity = (signal_sensitivity_w + signal_sensitivity_l) / 2.0
+            
+            # Differential Response - 条件(N2)的度量
+            differential_response = (policy_pref_chosen_logps - policy_chosen_logps) - (policy_pref_rejected_logps - policy_rejected_logps)
+            
+            # Advantage Ratio Stabilization
+            advantage_ratio_stability = torch.abs(torch.log(pref_advantage_ratio))  # log(R), 理想值接近0
 
             # 添加到metrics字典，保存每个样本的值而不是均值
             metrics[f'preference_metrics/pref_advantage_ratio_{train_test}'] = pref_advantage_ratio.cpu().detach().float().numpy().tolist()
@@ -916,6 +1227,47 @@ class PreferenceDPO_trainer(DPO_trainer):
             metrics[f'preference_metrics/pref_delta_l_{train_test}'] = pref_delta_l.cpu().detach().float().numpy().tolist()
             # 对差值也使用逐元素操作保存列表
             metrics[f'preference_metrics/pref_delta_diff_{train_test}'] = (pref_delta_w - pref_delta_l).cpu().detach().float().numpy().tolist()
+            
+            # ================== 理论框架指标记录 ==================
+            # Sufficient Conditions Metrics
+            metrics[f'theory_metrics/pms_{train_test}'] = pms_score.cpu().detach().float().numpy().tolist()
+            metrics[f'theory_metrics/tgs_{train_test}'] = tgs_score.cpu().detach().float().numpy().tolist()
+            
+            # Necessary Conditions Metrics  
+            metrics[f'theory_metrics/pcr_{train_test}'] = pcr_score.cpu().detach().float().numpy().tolist()
+            metrics[f'theory_metrics/signal_sensitivity_{train_test}'] = signal_sensitivity.cpu().detach().float().numpy().tolist()
+            metrics[f'theory_metrics/differential_response_{train_test}'] = differential_response.cpu().detach().float().numpy().tolist()
+            
+            # Internalization Progress Metrics
+            metrics[f'theory_metrics/ell_p_{train_test}'] = ell_p.cpu().detach().float().numpy().tolist()
+            metrics[f'theory_metrics/ell_base_{train_test}'] = ell_base.cpu().detach().float().numpy().tolist()
+            metrics[f'theory_metrics/advantage_ratio_stability_{train_test}'] = advantage_ratio_stability.cpu().detach().float().numpy().tolist()
+            
+            # 计算统计指标
+            metrics[f'theory_stats/pms_mean_{train_test}'] = pms_score.mean().cpu().detach().float().item()
+            metrics[f'theory_stats/tgs_mean_{train_test}'] = tgs_score.mean().cpu().detach().float().item()
+            metrics[f'theory_stats/pcr_mean_{train_test}'] = pcr_score.mean().cpu().detach().float().item()
+            metrics[f'theory_stats/signal_sensitivity_mean_{train_test}'] = signal_sensitivity.mean().cpu().detach().float().item()
+            
+            # 判断理论条件是否满足
+            pms_threshold = 0.1  # δ threshold for S1
+            tgs_threshold = 0.05  # ε threshold for S2  
+            pcr_threshold = 0.5   # threshold for N3
+            signal_threshold = 0.01  # γ threshold for N1
+            
+            metrics[f'theory_conditions/s1_satisfied_{train_test}'] = (pms_score.mean() >= pms_threshold).cpu().detach().float().item()
+            metrics[f'theory_conditions/s2_satisfied_{train_test}'] = (tgs_score.mean() <= tgs_threshold).cpu().detach().float().item()
+            metrics[f'theory_conditions/n3_satisfied_{train_test}'] = (pcr_score.mean() > pcr_threshold).cpu().detach().float().item()
+            metrics[f'theory_conditions/n1_satisfied_{train_test}'] = (signal_sensitivity.mean() >= signal_threshold).cpu().detach().float().item()
+            
+            # 综合满足度评估
+            conditions_met = [
+                pms_score.mean() >= pms_threshold,
+                tgs_score.mean() <= tgs_threshold, 
+                pcr_score.mean() > pcr_threshold,
+                signal_sensitivity.mean() >= signal_threshold
+            ]
+            metrics[f'theory_conditions/overall_satisfaction_{train_test}'] = sum(conditions_met) / len(conditions_met)
             
             metrics[f'reference_metrics/ref_advantage_ratio_{train_test}'] = ref_advantage_ratio.cpu().detach().float().numpy().tolist()
             metrics[f'reference_metrics/delta_w_ref_logps_{train_test}'] = delta_w_ref_logps.cpu().detach().float().numpy().tolist()
@@ -953,7 +1305,7 @@ class PreferenceDPO_trainer(DPO_trainer):
     def _cache_embedding_info(self):
         """缓存模型的embedding层信息，避免训练时重复调用get_input_embeddings"""
         try:
-            # 从policy_engine获取embedding信息
+            # 从policy_engine获取embedding信息（仅用于初始化基本信息）
             if hasattr(self.policy_engine, 'module'):
                 actual_model = self.policy_engine.module
             else:
@@ -961,19 +1313,25 @@ class PreferenceDPO_trainer(DPO_trainer):
             
             embedding_layer = actual_model.get_input_embeddings()
             
+            # 只缓存基本信息，不缓存embedding layer本身
+            # 修复：正确获取embedding维度
+            if len(embedding_layer.weight.shape) >= 2:
+                embed_dim = embedding_layer.weight.shape[-1]  # 最后一个维度是embed_dim
+            else:
+                # 如果weight形状不对，通过输入一个dummy tensor来获取输出维度
+                dummy_input = torch.tensor([[0]], device=embedding_layer.weight.device)
+                dummy_output = embedding_layer(dummy_input)
+                embed_dim = dummy_output.shape[-1]
+            
             self._cached_embedding_info = {
-                'embedding_layer': embedding_layer,
                 'model_dtype': embedding_layer.weight.dtype,
                 'model_device': embedding_layer.weight.device,
-                'embed_dim': embedding_layer.weight.shape[1]
+                'embed_dim': embed_dim
             }
-            print(f"缓存embedding信息成功: dtype={self._cached_embedding_info['model_dtype']}, device={self._cached_embedding_info['model_device']}, embed_dim={self._cached_embedding_info['embed_dim']}")
             
         except Exception as e:
-            print(f"缓存embedding信息失败: {e}")
             # 使用默认值作为fallback
             self._cached_embedding_info = {
-                'embedding_layer': None,
                 'model_dtype': torch.float32,
                 'model_device': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
                 'embed_dim': 4096  # 默认的embedding维度
@@ -986,12 +1344,163 @@ class PreferenceDPO_trainer(DPO_trainer):
                 self._cache_embedding_info()
                 return
                 
-            # 检查缓存的embedding_layer是否仍然有效
-            cached_layer = self._cached_embedding_info.get('embedding_layer')
-            if cached_layer is not None:
-                # 简单检查：确保权重仍然可访问
-                _ = cached_layer.weight.shape
-        except:
+            # 检查基本信息是否存在
+            if not all(key in self._cached_embedding_info for key in ['model_dtype', 'model_device', 'embed_dim']):
+                self._cache_embedding_info()
+        except Exception as e:
             # 如果访问失败，重新缓存
-            print("检测到embedding缓存失效，正在重新缓存...")
             self._cache_embedding_info()
+
+    def _pre_normalize_logps(self, policy_chosen_logps: torch.Tensor, policy_rejected_logps: torch.Tensor,
+                           policy_pref_chosen_logps: torch.Tensor, policy_pref_rejected_logps: torch.Tensor,
+                           normalize_strategy: str = "distribution_aware") -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Pre-normalize raw log probabilities before computing ratios to handle distribution differences
+        between embedding-based and hard prompts.
+        
+        Args:
+            policy_chosen_logps: Raw log probabilities for base chosen responses
+            policy_rejected_logps: Raw log probabilities for base rejected responses  
+            policy_pref_chosen_logps: Raw log probabilities for preference-augmented chosen responses
+            policy_pref_rejected_logps: Raw log probabilities for preference-augmented rejected responses
+            normalize_strategy: Strategy for pre-normalization
+            
+        Returns:
+            Tuple of normalized log probabilities in the same order as inputs
+        """
+        
+        # Store original dtype for later conversion
+        original_dtype = policy_chosen_logps.dtype
+        original_device = policy_chosen_logps.device
+        
+        if normalize_strategy == "distribution_aware":
+            # Advanced strategy specifically for embedding vs hard prompt distribution mismatch
+            
+            # Calculate statistics for each distribution
+            # Convert to float32 to ensure compatibility with quantile operations
+            base_logps = torch.cat([policy_chosen_logps, policy_rejected_logps]).float()
+            pref_logps = torch.cat([policy_pref_chosen_logps, policy_pref_rejected_logps]).float()
+            
+            base_mean, base_std = base_logps.mean(), base_logps.std() + 1e-8
+            pref_mean, pref_std = pref_logps.mean(), pref_logps.std() + 1e-8
+            
+            # Detect distribution type based on range and variance
+            base_range = base_logps.max() - base_logps.min()
+            pref_range = pref_logps.max() - pref_logps.min()
+            
+            # print(f"Pre-normalization stats:")
+            # print(f"  Base: mean={base_mean:.4f}, std={base_std:.4f}, range={base_range:.4f}")
+            # print(f"  Pref: mean={pref_mean:.4f}, std={pref_std:.4f}, range={pref_range:.4f}")
+            
+            # Use robust standardization with outlier protection
+            # Target: align both distributions to have similar scale and location
+            
+            # For the distribution with larger range (likely embedding-based), apply stronger normalization
+            if pref_range > base_range * 2:  # Pref has much larger range (embedding-based)
+                # Normalize pref to match base distribution characteristics
+                target_mean, target_std = base_mean, base_std
+                
+                # Use robust scaling for pref (likely embedding-based)
+                pref_median = pref_logps.median()
+                pref_q75 = torch.quantile(pref_logps, 0.75)
+                pref_q25 = torch.quantile(pref_logps, 0.25)
+                pref_iqr = pref_q75 - pref_q25 + 1e-8
+                
+                # Scale using IQR to target std, center using median to target mean
+                scale_factor = target_std / (pref_iqr / 1.349)  # 1.349 converts IQR to std for normal distribution
+                
+                policy_pref_chosen_logps_norm = (policy_pref_chosen_logps - pref_median) * scale_factor + target_mean
+                policy_pref_rejected_logps_norm = (policy_pref_rejected_logps - pref_median) * scale_factor + target_mean
+                
+                # Keep base distribution as is, or apply mild normalization
+                policy_chosen_logps_norm = policy_chosen_logps
+                policy_rejected_logps_norm = policy_rejected_logps
+                
+            elif base_range > pref_range * 2:  # Base has much larger range
+                # Normalize base to match pref distribution characteristics  
+                target_mean, target_std = pref_mean, pref_std
+                
+                base_median = base_logps.median()
+                base_q75 = torch.quantile(base_logps, 0.75)
+                base_q25 = torch.quantile(base_logps, 0.25)
+                base_iqr = base_q75 - base_q25 + 1e-8
+                
+                scale_factor = target_std / (base_iqr / 1.349)
+                
+                policy_chosen_logps_norm = (policy_chosen_logps - base_median) * scale_factor + target_mean
+                policy_rejected_logps_norm = (policy_rejected_logps - base_median) * scale_factor + target_mean
+                
+                policy_pref_chosen_logps_norm = policy_pref_chosen_logps
+                policy_pref_rejected_logps_norm = policy_pref_rejected_logps
+                
+            else:
+                # Ranges are similar, apply symmetric normalization
+                # Standardize both to unit variance and zero mean, then scale to common range
+                common_std = torch.sqrt((base_std**2 + pref_std**2) / 2)
+                common_mean = (base_mean + pref_mean) / 2
+                
+                policy_chosen_logps_norm = (policy_chosen_logps - base_mean) / base_std * common_std + common_mean
+                policy_rejected_logps_norm = (policy_rejected_logps - base_mean) / base_std * common_std + common_mean
+                policy_pref_chosen_logps_norm = (policy_pref_chosen_logps - pref_mean) / pref_std * common_std + common_mean
+                policy_pref_rejected_logps_norm = (policy_pref_rejected_logps - pref_mean) / pref_std * common_std + common_mean
+        
+        elif normalize_strategy == "robust_standardize":
+            # Robust standardization using median and IQR for both distributions
+            all_logps = torch.cat([policy_chosen_logps, policy_rejected_logps, 
+                                 policy_pref_chosen_logps, policy_pref_rejected_logps]).float()
+            
+            global_median = all_logps.median()
+            global_q75 = torch.quantile(all_logps, 0.75)
+            global_q25 = torch.quantile(all_logps, 0.25)
+            global_iqr = global_q75 - global_q25 + 1e-8
+            
+            # Standardize all using global robust statistics
+            policy_chosen_logps_norm = (policy_chosen_logps - global_median) / global_iqr
+            policy_rejected_logps_norm = (policy_rejected_logps - global_median) / global_iqr
+            policy_pref_chosen_logps_norm = (policy_pref_chosen_logps - global_median) / global_iqr
+            policy_pref_rejected_logps_norm = (policy_pref_rejected_logps - global_median) / global_iqr
+            
+        elif normalize_strategy == "percentile_clamp":
+            # Clamp to reasonable percentiles then standardize
+            all_logps = torch.cat([policy_chosen_logps, policy_rejected_logps,
+                                 policy_pref_chosen_logps, policy_pref_rejected_logps]).float()
+            
+            p5 = torch.quantile(all_logps, 0.05)
+            p95 = torch.quantile(all_logps, 0.95)
+            
+            # Clamp all values to [p5, p95] range
+            policy_chosen_logps_clamped = torch.clamp(policy_chosen_logps, p5, p95)
+            policy_rejected_logps_clamped = torch.clamp(policy_rejected_logps, p5, p95)
+            policy_pref_chosen_logps_clamped = torch.clamp(policy_pref_chosen_logps, p5, p95)
+            policy_pref_rejected_logps_clamped = torch.clamp(policy_pref_rejected_logps, p5, p95)
+            
+            # Then standardize
+            all_clamped = torch.cat([policy_chosen_logps_clamped, policy_rejected_logps_clamped,
+                                   policy_pref_chosen_logps_clamped, policy_pref_rejected_logps_clamped]).float()
+            mean_clamped = all_clamped.mean()
+            std_clamped = all_clamped.std() + 1e-8
+            
+            policy_chosen_logps_norm = (policy_chosen_logps_clamped - mean_clamped) / std_clamped
+            policy_rejected_logps_norm = (policy_rejected_logps_clamped - mean_clamped) / std_clamped
+            policy_pref_chosen_logps_norm = (policy_pref_chosen_logps_clamped - mean_clamped) / std_clamped
+            policy_pref_rejected_logps_norm = (policy_pref_rejected_logps_clamped - mean_clamped) / std_clamped
+            
+        else:  # "none" or any other value
+            # No pre-normalization, return as is
+            policy_chosen_logps_norm = policy_chosen_logps
+            policy_rejected_logps_norm = policy_rejected_logps
+            policy_pref_chosen_logps_norm = policy_pref_chosen_logps
+            policy_pref_rejected_logps_norm = policy_pref_rejected_logps
+        
+        # Log normalization results
+        # print(f"After pre-normalization:")
+        # print(f"  Base chosen: range=[{policy_chosen_logps_norm.min():.4f}, {policy_chosen_logps_norm.max():.4f}]")
+        # print(f"  Pref chosen: range=[{policy_pref_chosen_logps_norm.min():.4f}, {policy_pref_chosen_logps_norm.max():.4f}]")
+        
+        # Convert back to original dtype to maintain consistency
+        policy_chosen_logps_norm = policy_chosen_logps_norm.to(dtype=original_dtype, device=original_device)
+        policy_rejected_logps_norm = policy_rejected_logps_norm.to(dtype=original_dtype, device=original_device)
+        policy_pref_chosen_logps_norm = policy_pref_chosen_logps_norm.to(dtype=original_dtype, device=original_device)
+        policy_pref_rejected_logps_norm = policy_pref_rejected_logps_norm.to(dtype=original_dtype, device=original_device)
+        
+        return policy_chosen_logps_norm, policy_rejected_logps_norm, policy_pref_chosen_logps_norm, policy_pref_rejected_logps_norm

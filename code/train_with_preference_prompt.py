@@ -12,7 +12,7 @@ import json
 
 import deepspeed
 from pro_utils import preference_datasets
-from pro_utils.trainers import PreferenceDPO_trainer
+from pro_utils.trainers import PreferenceDPO_trainer, DPO_trainer
 deepspeed.ops.op_builder.CPUAdamBuilder().load()
 
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -55,6 +55,9 @@ class PreferenceTrainingArguments(TrainingArguments):
         self.loss_name = kwargs.pop("loss_name", None)
         self.beta = kwargs.pop("beta", None)
         self.alpha = kwargs.pop("alpha", 0.1)  # Parameter for preference loss weighting
+        self.lambda_kl = kwargs.pop("lambda_kl", 0.1)  # Parameter for KL divergence constraint
+        self.normalize_strategy = kwargs.pop("normalize_strategy", "scale_to_base")  # Normalization strategy
+        self.pre_normalize_strategy = kwargs.pop("pre_normalize_strategy", "distribution_aware")  # Pre-normalization strategy
         self.label_smoothing = kwargs.pop("label_smoothing", None)
         self.run_dir = kwargs.pop("run_dir", None)
         self.eval_every = kwargs.pop("eval_every", None)
@@ -139,6 +142,27 @@ def parse_arguments():
         help="Alpha parameter for preference loss weighting"
     )
     parser.add_argument(
+        "--lambda-kl",
+        type=float,
+        default=0.1,
+        help="Lambda parameter for KL divergence constraint"
+    )
+    parser.add_argument(
+        "--normalize-strategy",
+        type=str,
+        default="magnitude_preserve",
+        choices=["none", "min_max", "z_score", "scale_to_base", "adaptive_scaling", "soft_clamp", 
+                "robust_scaling", "magnitude_preserve", "percentile_scaling", "dynamic_range"],
+        help="Normalization strategy for log ratios: none, min_max, z_score, scale_to_base, adaptive_scaling, soft_clamp, robust_scaling, magnitude_preserve, percentile_scaling, dynamic_range"
+    )
+    parser.add_argument(
+        "--pre-normalize-strategy",
+        type=str,
+        default="distribution_aware",
+        choices=["none", "distribution_aware", "robust_standardize", "percentile_clamp"],
+        help="Pre-normalization strategy for log probabilities before computing ratios: none, distribution_aware (for embedding vs hard prompt mismatch), robust_standardize, percentile_clamp"
+    )
+    parser.add_argument(
         "--learning-rate",
         type=float,
         default=5e-4,
@@ -208,6 +232,12 @@ def parse_arguments():
         default="Preference_Guided_DPO",
         help="Wandb project name"
     )
+    parser.add_argument(
+        "--loss-name",
+        type=str,
+        default="new_pref_po",
+        help="Loss function name: dpo, ipo, new_pref_po, sipa, etc."
+    )
     
     # DeepSpeed parameters (automatically added by DeepSpeed launcher)
     parser.add_argument(
@@ -268,15 +298,45 @@ def main():
     policy_lora_model = get_peft_model(policy_model, lora_config)
     policy_lora_model.enable_input_require_grads()
 
-    # Generate run name
+    # Extract model short name from path for naming
+    model_short_name = args.policy_model_path.split('/')[-1]
+    if model_short_name == "Qwen2.5-1.5B-Instruct":
+        model_short_name = "Qwen2.5-1.5B"
+    elif "DeepSeek-R1-Distill-Qwen-1.5B" in model_short_name:
+        model_short_name = "DeepSeek-R1-Qwen1.5B"
+    # Add more model name mappings as needed
+
+    # Generate run name based on configuration
     if args.run_name is None:
-        if args.use_prompt_embedding:
-            embedding_name = os.path.basename(args.prompt_embedding_path).replace('.pt', '').replace('.pth', '')
-            args.run_name = f"PrefEmb-{embedding_name}-Qwen2.5-1.5B-Ins-beta{args.beta}-alpha{args.alpha}"
+        # Determine dataset prefix
+        if 'helpsteer' in args.dataset_path.lower():
+            dataset_prefix = "HelpSteer"
+        elif 'ultrafeedback' in args.dataset_path.lower() or 'ufb' in args.dataset_path.lower():
+            dataset_prefix = "UFB"
         else:
-            args.run_name = f"PrefText-Qwen2.5-1.5B-Ins-beta{args.beta}-alpha{args.alpha}"
+            dataset_prefix = "Custom"
+        
+        # Determine mode prefix
+        if args.use_prompt_embedding:
+            mode_prefix = "Emb"
+        else:
+            mode_prefix = "Text"
+        
+        # Generate comprehensive run name
+        args.run_name = f"{dataset_prefix}-{mode_prefix}-{model_short_name}-{args.loss_name}-beta{args.beta}-alpha{args.alpha}-norm{args.normalize_strategy}"
     
     wandb_name = f'{args.wandb_project}-{args.run_name}'
+
+    # Determine dataset type from path before creating training_args
+    if 'helpsteer' in args.dataset_path.lower():
+        train_data_name = 'helpsteer'
+        test_data_name = 'helpsteer'
+    elif 'ultrafeedback' in args.dataset_path.lower() or 'ufb' in args.dataset_path.lower():
+        train_data_name = 'ufb'
+        test_data_name = 'ufb'
+    else:
+        train_data_name = 'ufb'  # Default to ultrafeedback
+        test_data_name = 'ufb'
 
     # Training arguments
     training_args = PreferenceTrainingArguments(
@@ -302,13 +362,16 @@ def main():
         deepspeed=deepspeed_cfg,
         bf16=True,
         report_to="tensorboard",
-        datasets="ufb",
+        datasets=train_data_name,  # Use automatically determined dataset name
         custom_dataset_path=args.dataset_path,
         max_length=args.max_length,
         max_prompt_length=args.max_prompt_length,
-        loss_name='new_pref_po',  # Using custom preference loss
+        loss_name=args.loss_name,  # Use configurable loss function
         beta=args.beta,
         alpha=args.alpha,  # Weight for preference consistency loss
+        lambda_kl=args.lambda_kl,  # Weight for KL divergence constraint
+        normalize_strategy=args.normalize_strategy,  # Normalization strategy for log ratios
+        pre_normalize_strategy=args.pre_normalize_strategy,  # Pre-normalization strategy for log probabilities
         label_smoothing=0,
         run_dir=f'./model_output_{args.wandb_project}/{wandb_name}',
         cache_dirs='./cache/huggingface/transformers',
@@ -323,10 +386,6 @@ def main():
         prompt_embedding_path=args.prompt_embedding_path,
         use_prompt_embedding=args.use_prompt_embedding,
     )
-
-    # Load datasets
-    train_data_name = training_args.datasets
-    test_data_name = 'ufb'
 
     # Load the datasets based on the training mode
     if args.use_prompt_embedding:
@@ -368,25 +427,30 @@ def main():
     if args.use_prompt_embedding:
         trainer_kwargs['prompt_embeddings'] = prompt_embeddings
     
-    preference_dpo_trainer = PreferenceDPO_trainer(**trainer_kwargs)
+    preference_dpo_trainer = DPO_trainer(**trainer_kwargs)
 
     # Print training configuration
     print("\n" + "="*60)
     print("🚀 Training Configuration")
     print("="*60)
+    print(f"Dataset: {'HelpSteer' if 'helpsteer' in args.dataset_path.lower() else 'UltraFeedback' if 'ultrafeedback' in args.dataset_path.lower() else 'Custom'}")
     print(f"Training Mode: {'Prompt Embedding' if args.use_prompt_embedding else 'Text Instruction'}")
+    print(f"Loss Function: {args.loss_name}")
     if args.use_prompt_embedding:
         print(f"Prompt Embedding Path: {args.prompt_embedding_path}")
         print(f"Embedding Shape: {prompt_embeddings.shape}")
     else:
         print(f"Preference Text: \"{args.preference_text}\"")
-    print(f"Policy Model: {args.policy_model_path}")
-    print(f"Reference Model: {args.reference_model_path}")
+    print(f"Model: {model_short_name} ({args.policy_model_path})")
     print(f"Beta: {args.beta}")
     print(f"Alpha: {args.alpha}")
+    print(f"Lambda KL: {args.lambda_kl}")
+    print(f"Normalize Strategy: {args.normalize_strategy}")
+    print(f"Pre-Normalize Strategy: {args.pre_normalize_strategy}")
     print(f"Learning Rate: {args.learning_rate}")
     print(f"Epochs: {args.num_train_epochs}")
     print(f"LoRA Config: r={args.lora_r}, alpha={args.lora_alpha}, dropout={args.lora_dropout}")
+    print(f"Run Name: {args.run_name}")
     print(f"Output Dir: {args.output_dir}")
     print("="*60)
 

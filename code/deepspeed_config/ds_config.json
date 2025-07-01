@@ -5,11 +5,19 @@
     "optimizer": {
         "type": "Adam",
         "params": {
-            "lr": 1e-6,
+            "lr": 5e-7,
             "betas": [0.9, 0.999],
             "eps": 1e-8,
             "weight_decay": 3e-7
         }
+    },
+    "scheduler":{
+        "type": "WarmupCosineLR",
+        "params": {
+            "warmup_num_steps": 1000,
+            "total_num_steps": 61000
+        }
+
     },
 	"zero_optimization": {
 		"stage": 3,
@@ -36,11 +44,11 @@
     },
     "model_parallelism":{
         "enabled":true,
-        "degree":2
+        "degree":3
     },
-	"train_batch_size": 8,
-	"train_micro_batch_size_per_gpu":4,
-    "gradient_accumulation_steps": 1,
+	"train_batch_size": 12,
+	"train_micro_batch_size_per_gpu":1,
+    "gradient_accumulation_steps": 4,
     "gradient_clipping": 1.0,
     "steps_per_print": 100,
     "wall_clock_breakdown": false,
