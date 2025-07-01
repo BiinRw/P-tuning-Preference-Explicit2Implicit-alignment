@@ -82,6 +82,8 @@ code/wangbinrui/
 !code/pro_utils/
 !code/deepspeed_config/
 !scripts/
+!code/Ptuning/*.py
+!code/Ptuning/*.sh
 
 # 保留根目录下的Python文件
 !*.py
